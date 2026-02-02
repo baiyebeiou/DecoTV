@@ -42,6 +42,10 @@ function DoubanPageClient() {
   const isFirstMount = useRef(true);
   const prevTypeRef = useRef(type);
 
+  // === 请求生命周期管理：防止并发和重复加载 ===
+  const pendingCacheKeyRef = useRef<string | null>(null); // 当前正在加载的 cacheKey
+  const abortControllerRef = useRef<AbortController | null>(null); // 用于取消前一个请求
+
   // 用于存储最新参数值的 refs
   const currentParamsRef = useRef({
     type: '',
@@ -285,9 +289,43 @@ function DoubanPageClient() {
     [type, primarySelection, secondarySelection],
   );
 
-  // 防抖的数据加载函数 - 缓存优先
+  // 防抖的数据加载函数 - 缓存优先 + 请求生命周期管理
   const loadInitialData = useCallback(async () => {
     // 创建当前参数的快照
+    // 【关键修复】检查选择器状态是否与 type 同步
+    // 防止状态不同步时发起错误的请求（这是导致卡顿的根本原因）
+    const isStateInSync = (() => {
+      if (type === 'movie') {
+        return primarySelection === '热门' || primarySelection === '全部';
+      }
+      if (type === 'tv') {
+        return (
+          (primarySelection === '最近热门' || primarySelection === '全部') &&
+          (secondarySelection === 'tv' || secondarySelection === 'all')
+        );
+      }
+      if (type === 'show') {
+        return (
+          (primarySelection === '最近热门' || primarySelection === '全部') &&
+          (secondarySelection === 'show' || secondarySelection === 'all')
+        );
+      }
+      if (type === 'anime') {
+        return ['每日放送', '番剧', '剧场版', '全部'].includes(
+          primarySelection,
+        );
+      }
+      if (type === 'custom') {
+        return true; // 自定义分类不做检查
+      }
+      return true;
+    })();
+
+    if (!isStateInSync) {
+      // 状态还没同步，跳过这次加载，等待下一次 useEffect 触发
+      return;
+    }
+
     const requestSnapshot = {
       type,
       primarySelection,
@@ -306,8 +344,13 @@ function DoubanPageClient() {
       ...multiLevelValues,
     });
 
-    // 【防止并发】检查是否正在加载
-    if (isDoubanLoading(cacheKey)) {
+    // 【请求生命周期】如果有新的请求，取消前一个
+    if (pendingCacheKeyRef.current && pendingCacheKeyRef.current !== cacheKey) {
+      abortControllerRef.current?.abort();
+    }
+
+    // 【防止同一 cacheKey 的并发】避免对同一数据发起多个请求
+    if (pendingCacheKeyRef.current === cacheKey) {
       return;
     }
 
@@ -315,6 +358,7 @@ function DoubanPageClient() {
     const cachedData = getDoubanData(cacheKey);
     if (cachedData && cachedData.length > 0) {
       // 缓存命中：使用 flushSync 强制同步更新 DOM，实现毫秒级渲染
+      pendingCacheKeyRef.current = null; // 清除待处理标记
       flushSync(() => {
         setDoubanData(cachedData);
         setLoading(false);
@@ -324,12 +368,15 @@ function DoubanPageClient() {
       return;
     }
 
-    // 【无缓存】标记为正在加载，显示骨架屏
+    // 【无缓存】标记为正在加载，记录当前 cacheKey
+    pendingCacheKeyRef.current = cacheKey;
+    // 创建新的 AbortController 用于取消请求
+    abortControllerRef.current = new AbortController();
+
     setDoubanLoading(cacheKey, true);
     setLoading(true);
 
     try {
-      setLoading(true);
       // 确保在加载初始数据时重置页面状态
       setDoubanData([]);
       setCurrentPage(0);
@@ -453,6 +500,10 @@ function DoubanPageClient() {
       console.error(err);
       setLoading(false); // 发生错误时总是停止loading状态
     } finally {
+      // 【请求生命周期】清除待处理标记
+      if (pendingCacheKeyRef.current === cacheKey) {
+        pendingCacheKeyRef.current = null;
+      }
       // 清除加载状态
       setDoubanLoading(cacheKey, false);
     }
