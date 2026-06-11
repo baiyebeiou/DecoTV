@@ -5,8 +5,8 @@ import { getConfig } from '@/lib/config';
 import { signM3U8ProxyRequest } from '@/lib/m3u8-proxy';
 import { SearchResult } from '@/lib/types';
 
-// Server-side HLS proxying is opt-in. Default playback should stay direct so a
-// reverse proxy does not turn normal playback into server transit traffic.
+// Browser playback defaults to the filter proxy so upstream ad segments can be
+// removed. Native TV clients stay direct unless explicitly opted in below.
 function parseBooleanFlag(value: string | undefined): boolean | null {
   if (value === undefined) return null;
   const normalized = value.trim().toLowerCase();
@@ -32,6 +32,22 @@ function getQueryProxyMode(request: NextRequest): boolean | null {
   return null;
 }
 
+function isNativeTvClient(request: NextRequest): boolean {
+  const headers = request.headers as Headers | undefined;
+  const searchParams = request.nextUrl?.searchParams;
+  const ua = (headers?.get('user-agent') || '').toLowerCase();
+  const client = (searchParams?.get('client') || '').toLowerCase();
+
+  return (
+    client === 'orion' ||
+    client === 'oriontv' ||
+    ua.includes('orion') ||
+    ua.includes('reactnative') ||
+    ua.includes('expo') ||
+    ua.includes('okhttp')
+  );
+}
+
 export function shouldUseServerSideEpisodeProxy(
   adminConfig: AdminConfig | null,
   request: NextRequest,
@@ -39,15 +55,22 @@ export function shouldUseServerSideEpisodeProxy(
   const queryMode = getQueryProxyMode(request);
   if (queryMode !== null) return queryMode;
 
+  // Native TV players are more sensitive to rewritten HLS playlists. Keep their
+  // default playback URL direct so seeking uses the upstream timeline.
+  if (isNativeTvClient(request)) return false;
+
   const explicitProxyFlag =
     parseBooleanFlag(process.env.M3U8_SERVER_PROXY) ??
     parseBooleanFlag(process.env.ENABLE_M3U8_SERVER_PROXY);
   if (explicitProxyFlag !== null) return explicitProxyFlag;
 
+  const legacyAdFilterFlag = parseBooleanFlag(process.env.ENABLE_AD_FILTER);
+  if (legacyAdFilterFlag !== null) return legacyAdFilterFlag;
+
   const adminFlag = adminConfig?.AdFilterConfig?.enabled;
   if (typeof adminFlag === 'boolean') return adminFlag;
 
-  return parseBooleanFlag(process.env.ENABLE_AD_FILTER) === true;
+  return true;
 }
 
 function buildFilterProxyUrl(

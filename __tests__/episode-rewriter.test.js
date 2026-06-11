@@ -8,15 +8,22 @@ const {
   shouldUseServerSideEpisodeProxy,
 } = require('../src/lib/episode-rewriter');
 
-function makeRequest(adfilter) {
+function makeRequest(adfilter, options = {}) {
   const searchParams = new URLSearchParams();
   if (adfilter !== undefined) {
     searchParams.set('adfilter', adfilter);
+  }
+  if (options.client) {
+    searchParams.set('client', options.client);
   }
 
   return {
     nextUrl: {
       searchParams,
+    },
+    headers: {
+      get: (name) =>
+        name.toLowerCase() === 'user-agent' ? options.userAgent : undefined,
     },
   };
 }
@@ -38,18 +45,18 @@ describe('shouldUseServerSideEpisodeProxy', () => {
     }
   });
 
-  it('keeps playback direct by default', () => {
+  it('uses server-side filtering by default for browser playback', () => {
     delete process.env.ENABLE_AD_FILTER;
     delete process.env.ENABLE_M3U8_SERVER_PROXY;
     delete process.env.M3U8_SERVER_PROXY;
 
-    expect(shouldUseServerSideEpisodeProxy(null, makeRequest())).toBe(false);
+    expect(shouldUseServerSideEpisodeProxy(null, makeRequest())).toBe(true);
   });
 
-  it('allows legacy env opt-in for server-side filtering', () => {
-    process.env.ENABLE_AD_FILTER = 'true';
+  it('allows legacy env to disable server-side filtering', () => {
+    process.env.ENABLE_AD_FILTER = 'false';
 
-    expect(shouldUseServerSideEpisodeProxy(null, makeRequest())).toBe(true);
+    expect(shouldUseServerSideEpisodeProxy(null, makeRequest())).toBe(false);
   });
 
   it('lets explicit proxy env override admin defaults', () => {
@@ -73,5 +80,21 @@ describe('shouldUseServerSideEpisodeProxy', () => {
         makeRequest('direct'),
       ),
     ).toBe(false);
+  });
+
+  it('keeps native TV clients direct unless the request explicitly opts in', () => {
+    expect(
+      shouldUseServerSideEpisodeProxy(
+        { AdFilterConfig: { enabled: true } },
+        makeRequest(undefined, { userAgent: 'OrionTV okhttp' }),
+      ),
+    ).toBe(false);
+
+    expect(
+      shouldUseServerSideEpisodeProxy(
+        { AdFilterConfig: { enabled: true } },
+        makeRequest('server', { client: 'oriontv' }),
+      ),
+    ).toBe(true);
   });
 });
